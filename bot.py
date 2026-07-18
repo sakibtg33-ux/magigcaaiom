@@ -5,17 +5,15 @@ import httpx
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
-# ================= কনফিগারেশন (এখানে আপনার টোকেন ও API Key দিন) =================
-TG_BOT_TOKEN = "8426545218:AAFKYlHjZwUlLrgXVPyDhRr0cMreRtPWwqw"            # @BotFather থেকে নিন
-DEFAULT_MAGICA_API_KEY = "YOUR_API_KEY"    # Magica API Key (অথবা খালি রাখুন)
+# ================= কনফিগারেশন =================
+TG_BOT_TOKEN = "8426545218:AAFKYlHjZwUlLrgXVPyDhRr0cMreRtPWwqw"   # @BotFather থেকে নিন
 BASE_URL = "https://api.magica.com/api"
-# ========================================================================
+# =============================================
 
-# মেমোরিতে ডেটা রাখা (সাধারণ ব্যবহারের জন্য ঠিক আছে)
 user_api_keys = {}
 active_generations = {}
 
-async def generate_video(prompt: str, api_key: str) -> str:
+async def generate_video(prompt: str, api_key: str, status_message, update: Update) -> str:
     async with httpx.AsyncClient(timeout=60.0) as client:
         headers = {'Content-Type': 'application/json', 'Authorization': f'Bearer {api_key}'}
         payload = {
@@ -26,32 +24,46 @@ async def generate_video(prompt: str, api_key: str) -> str:
         start_res = await client.post(f"{BASE_URL}/v1/nodes/gemini_omni_flash/run", json=payload, headers=headers)
         start_res.raise_for_status()
         run_id = start_res.json()['runId']
+
+        # প্রগ্রেস ট্র্যাক করার জন্য
+        progress = 0
         while True:
             poll_res = await client.get(f"{BASE_URL}/v1/nodes/runs/{run_id}", headers=headers)
             poll_res.raise_for_status()
             data = poll_res.json()
             status = data['status']
             if status == 'COMPLETED':
+                # ১০০% দেখান
+                await status_message.edit_text("✅ 100% সম্পন্ন! ভিডিও ডাউনলোড হচ্ছে...")
                 return data['output']['result'][0]
             elif status == 'FAILED':
                 raise Exception(data.get('error', 'Unknown error'))
+            
+            # সিমুলেটেড প্রগ্রেস (যতক্ষণ চলছে, প্রতি চক্রে বাড়বে)
+            progress = min(progress + 20, 90)  # ৯০% পর্যন্ত, শেষে ১০০% হবে
+            await status_message.edit_text(f"⏳ ভিডিও তৈরি হচ্ছে... {progress}% সম্পন্ন")
             await asyncio.sleep(5)
 
 async def handle_generation(update: Update, context: ContextTypes.DEFAULT_TYPE, prompt: str):
     user_id = update.effective_user.id
-    api_key = user_api_keys.get(user_id) or DEFAULT_MAGICA_API_KEY
+    api_key = user_api_keys.get(user_id)
     if not api_key:
         await update.message.reply_text("❌ API key পাওয়া যায়নি। /setapi YOUR_API_KEY দিয়ে সেট করুন।", parse_mode='HTML')
         return
     try:
-        await update.message.reply_text(f"⏳ প্রম্পট প্রসেস করা হচ্ছে: <b>{prompt}</b>\nভিডিও তৈরি হতে ২০-৩০ সেকেন্ড সময় লাগতে পারে...", parse_mode='HTML')
-        video_url = await generate_video(prompt, api_key)
+        # প্রাথমিক মেসেজ (প্রম্পট দেখানো হবে না)
+        status_msg = await update.message.reply_text("⏳ ভিডিও তৈরি হতে ২০-৩০ সেকেন্ড সময় লাগতে পারে... 0% সম্পন্ন")
+        
+        video_url = await generate_video(prompt, api_key, status_msg, update)
+        
+        # ভিডিও ডাউনলোড ও পাঠানো
         async with httpx.AsyncClient(timeout=120.0) as client:
             video_response = await client.get(video_url)
             video_response.raise_for_status()
             with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp_file:
                 tmp_file.write(video_response.content)
                 tmp_path = tmp_file.name
+        
         keyboard = [[InlineKeyboardButton("📥 সরাসরি ডাউনলোড লিংক", url=video_url)]]
         reply_markup = InlineKeyboardMarkup(keyboard)
         with open(tmp_path, 'rb') as video_file:
@@ -62,11 +74,17 @@ async def handle_generation(update: Update, context: ContextTypes.DEFAULT_TYPE, 
                 reply_markup=reply_markup
             )
         os.unlink(tmp_path)
+        
+        # স্ট্যাটাস মেসেজ ডিলিট বা এডিট করে শেষ করা
+        await status_msg.edit_text("✅ ভিডিও জেনারেশন সম্পন্ন! উপরে আপনার ভিডিও দেখুন।")
+        
     except Exception as e:
         await update.message.reply_text(f"❌ দুঃখিত, ভিডিও জেনারেট করতে সমস্যা হয়েছে:\n<code>{str(e)}</code>", parse_mode='HTML')
     finally:
         if user_id in active_generations:
             del active_generations[user_id]
+
+# ... বাকি কোড (set_api, start, help, status, handle_prompt, main) আগের মতোই থাকবে ...
 
 async def set_api(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
@@ -84,7 +102,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/start – শুরু\n"
         "/help – সাহায্য\n"
         "/status – চলমান কাজ\n"
-        "/setapi <API_KEY> – API সেট করুন",
+        "/setapi <API_KEY> – API সেট করুন (প্রথমে এটি করুন)",
         parse_mode='HTML'
     )
 
@@ -111,7 +129,7 @@ async def handle_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user_id in active_generations:
         await update.message.reply_text("⚠️ আগের কাজ শেষ হোক।")
         return
-    if not (user_api_keys.get(user_id) or DEFAULT_MAGICA_API_KEY):
+    if not user_api_keys.get(user_id):
         await update.message.reply_text("⚠️ আগে /setapi দিন।", parse_mode='HTML')
         return
     active_generations[user_id] = {'prompt': prompt}
