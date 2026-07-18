@@ -6,18 +6,33 @@ from flask import Flask, request, jsonify
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
-# ================= সব কনফিগারেশন এখানে (env ছাড়া) =================
-TG_BOT_TOKEN = "8426545218:AAFKYlHjZwUlLrgXVPyDhRr0cMreRtPWwqw"          # আপনার বট টোকেন দিন
-DEFAULT_MAGICA_API_KEY = "" # আপনার Magica API Key দিন (অথবা খালি রাখুন)
+# ================= কনফিগারেশন (সব এখানে) =================
+TG_BOT_TOKEN = "8426545218:AAFKYlHjZwUlLrgXVPyDhRr0cMreRtPWwqw"              # আপনার টোকেন দিন
+DEFAULT_MAGICA_API_KEY = "YOUR_API_KEY"      # আপনার API কী দিন (অথবা খালি রাখুন)
 BASE_URL = "https://api.magica.com/api"
-# ===================================================================
+# =========================================================
 
 app = Flask(__name__)
 
-# ইউজার-নির্দিষ্ট API Key সংরক্ষণ (মেমোরিতে)
+# মেমোরিতে ডেটা রাখা (Vercel-এ কাজ করবে না দীর্ঘমেয়াদে, তবে টেস্টিং-এর জন্য ঠিক)
 user_api_keys = {}
 active_generations = {}
 
+# গ্লোবাল অ্যাপ্লিকেশন অবজেক্ট
+bot_app = None
+
+def get_bot_app():
+    global bot_app
+    if bot_app is None:
+        bot_app = Application.builder().token(TG_BOT_TOKEN).build()
+        bot_app.add_handler(CommandHandler("start", start))
+        bot_app.add_handler(CommandHandler("help", help_command))
+        bot_app.add_handler(CommandHandler("status", status_command))
+        bot_app.add_handler(CommandHandler("setapi", set_api))
+        bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_prompt))
+    return bot_app
+
+# ================= কোর ফাংশন =================
 async def generate_video(prompt: str, api_key: str) -> str:
     async with httpx.AsyncClient(timeout=60.0) as client:
         headers = {
@@ -158,7 +173,7 @@ async def handle_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     active_generations[user_id] = {'prompt': prompt}
     asyncio.create_task(handle_generation(update, context, prompt))
 
-# ================= Flask রাউট =================
+# ================= ওয়েবহুক হ্যান্ডলার (ফিক্সড) =================
 @app.route('/', methods=['GET', 'POST'])
 def index():
     return "Bot is running!", 200
@@ -166,22 +181,25 @@ def index():
 @app.route('/webhook', methods=['POST'])
 def webhook():
     try:
-        update = Update.de_json(request.get_json(), bot_app.bot)
-        asyncio.run(process_update(update))
+        # JSON ডেটা নিন
+        json_data = request.get_json()
+        if not json_data:
+            return jsonify({"status": "error", "message": "No JSON data"}), 400
+        
+        # Update অবজেক্ট তৈরি করুন
+        update = Update.de_json(json_data, get_bot_app().bot)
+        if update is None:
+            return jsonify({"status": "error", "message": "Invalid update"}), 400
+        
+        # ইভেন্ট লুপ তৈরি করে প্রসেস করুন (Vercel-এর সাথে সামঞ্জস্যপূর্ণ)
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(get_bot_app().process_update(update))
+        finally:
+            loop.close()
+        
         return jsonify({"status": "ok"}), 200
     except Exception as e:
-        print(f"Error: {e}")
-        return jsonify({"status": "error"}), 500
-
-async def process_update(update: Update):
-    global bot_app
-    if 'bot_app' not in globals():
-        bot_app = Application.builder().token(TG_BOT_TOKEN).build()
-        bot_app.add_handler(CommandHandler("start", start))
-        bot_app.add_handler(CommandHandler("help", help_command))
-        bot_app.add_handler(CommandHandler("status", status_command))
-        bot_app.add_handler(CommandHandler("setapi", set_api))
-        bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_prompt))
-    await bot_app.process_update(update)
-
-bot_app = None
+        print(f"Webhook error: {e}")
+        return jsonify({"status": "error", "message": str(e)}), 500
