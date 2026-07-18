@@ -6,18 +6,24 @@ from flask import Flask, request, jsonify
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
-# ================= কনফিগারেশন =================
-TG_BOT_TOKEN = 8426545218:AAFKYlHjZwUlLrgXVPyDhRr0cMreRtPWwqw"             # আপনার টোকেন দিন
-DEFAULT_MAGICA_API_KEY = "YOUR_API_KEY"     # আপনার API কী দিন (অথবা খালি)
+# ================= কনফিগারেশন (এখানে আপনার টোকেন ও API Key দিন) =================
+TG_BOT_TOKEN = "8426545218:AAFKYlHjZwUlLrgXVPyDhRr0cMreRtPWwqw"            # @BotFather থেকে নিন
+DEFAULT_MAGICA_API_KEY = "YOUR_API_KEY"    # Magica API Key (অথবা খালি রাখুন)
 BASE_URL = "https://api.magica.com/api"
-# =============================================
+# ========================================================================
 
+# Flask অ্যাপ্লিকেশন (Vercel এই 'app' খুঁজে পাবে)
 app = Flask(__name__)
+
+# মেমোরিতে ডেটা রাখা (Vercel-এ স্থায়ী নয়, তবে কমান্ডের জন্য ঠিক)
 user_api_keys = {}
 active_generations = {}
+
+# টেলিগ্রাম বট অ্যাপ্লিকেশন (গ্লোবাল)
 bot_app = None
 
 def get_bot_app():
+    """সিঙ্গেলটন প্যাটার্নে বট অ্যাপ্লিকেশন তৈরি"""
     global bot_app
     if bot_app is None:
         bot_app = Application.builder().token(TG_BOT_TOKEN).build()
@@ -28,34 +34,20 @@ def get_bot_app():
         bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_prompt))
     return bot_app
 
-# ================= কোর ফাংশন =================
+# ================= API কল ফাংশন =================
 async def generate_video(prompt: str, api_key: str) -> str:
     async with httpx.AsyncClient(timeout=60.0) as client:
-        headers = {
-            'Content-Type': 'application/json',
-            'Authorization': f'Bearer {api_key}'
-        }
+        headers = {'Content-Type': 'application/json', 'Authorization': f'Bearer {api_key}'}
         payload = {
             "nodeType": "gemini_omni_flash",
-            "input": {
-                "prompt": prompt,
-                "duration": 10,
-                "aspect_ratio": "9:16"
-            },
+            "input": {"prompt": prompt, "duration": 10, "aspect_ratio": "9:16"},
             "subModelId": "gemini-omni-flash-text-to-video"
         }
-        start_res = await client.post(
-            f"{BASE_URL}/v1/nodes/gemini_omni_flash/run",
-            json=payload,
-            headers=headers
-        )
+        start_res = await client.post(f"{BASE_URL}/v1/nodes/gemini_omni_flash/run", json=payload, headers=headers)
         start_res.raise_for_status()
         run_id = start_res.json()['runId']
         while True:
-            poll_res = await client.get(
-                f"{BASE_URL}/v1/nodes/runs/{run_id}",
-                headers=headers
-            )
+            poll_res = await client.get(f"{BASE_URL}/v1/nodes/runs/{run_id}", headers=headers)
             poll_res.raise_for_status()
             data = poll_res.json()
             status = data['status']
@@ -65,35 +57,24 @@ async def generate_video(prompt: str, api_key: str) -> str:
                 raise Exception(data.get('error', 'Unknown error'))
             await asyncio.sleep(5)
 
+# ================= ভিডিও জেনারেশন হ্যান্ডলার =================
 async def handle_generation(update: Update, context: ContextTypes.DEFAULT_TYPE, prompt: str):
     user_id = update.effective_user.id
     api_key = user_api_keys.get(user_id) or DEFAULT_MAGICA_API_KEY
-    
     if not api_key:
-        await update.message.reply_text(
-            "❌ API key পাওয়া যায়নি। /setapi YOUR_API_KEY দিয়ে সেট করুন।",
-            parse_mode='HTML'
-        )
+        await update.message.reply_text("❌ API key পাওয়া যায়নি। /setapi YOUR_API_KEY দিয়ে সেট করুন।", parse_mode='HTML')
         return
-    
     try:
-        await update.message.reply_text(
-            f"⏳ প্রম্পট প্রসেস করা হচ্ছে: <b>{prompt}</b>\nভিডিও তৈরি হতে ২০-৩০ সেকেন্ড সময় লাগতে পারে...",
-            parse_mode='HTML'
-        )
-        
+        await update.message.reply_text(f"⏳ প্রম্পট প্রসেস করা হচ্ছে: <b>{prompt}</b>\nভিডিও তৈরি হতে ২০-৩০ সেকেন্ড সময় লাগতে পারে...", parse_mode='HTML')
         video_url = await generate_video(prompt, api_key)
-        
         async with httpx.AsyncClient(timeout=120.0) as client:
             video_response = await client.get(video_url)
             video_response.raise_for_status()
             with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp_file:
                 tmp_file.write(video_response.content)
                 tmp_path = tmp_file.name
-        
         keyboard = [[InlineKeyboardButton("📥 সরাসরি ডাউনলোড লিংক", url=video_url)]]
         reply_markup = InlineKeyboardMarkup(keyboard)
-        
         with open(tmp_path, 'rb') as video_file:
             await update.message.reply_document(
                 document=video_file,
@@ -101,26 +82,18 @@ async def handle_generation(update: Update, context: ContextTypes.DEFAULT_TYPE, 
                 caption="✅ আপনার ভিডিও প্রস্তুত! (১০ সেকেন্ড, ৯:১৬, ৭২০পি)\nনিচের বাটনে ক্লিক করেও সরাসরি ডাউনলোড করতে পারেন।",
                 reply_markup=reply_markup
             )
-        
         os.unlink(tmp_path)
-        
     except Exception as e:
-        await update.message.reply_text(
-            f"❌ দুঃখিত, ভিডিও জেনারেট করতে সমস্যা হয়েছে:\n<code>{str(e)}</code>",
-            parse_mode='HTML'
-        )
+        await update.message.reply_text(f"❌ দুঃখিত, ভিডিও জেনারেট করতে সমস্যা হয়েছে:\n<code>{str(e)}</code>", parse_mode='HTML')
     finally:
         if user_id in active_generations:
             del active_generations[user_id]
 
-# ================= কমান্ড হ্যান্ডলার =================
+# ================= কমান্ড হ্যান্ডলারসমূহ =================
 async def set_api(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
     if not args:
-        await update.message.reply_text(
-            "⚠️ ব্যবহার: /setapi আপনার_এপিআই_কী",
-            parse_mode='HTML'
-        )
+        await update.message.reply_text("⚠️ ব্যবহার: /setapi আপনার_এপিআই_কী", parse_mode='HTML')
         return
     user_api_keys[update.effective_user.id] = args[0].strip()
     await update.message.reply_text("✅ API key সেট হয়েছে। এখন ভিডিও জেনারেট করতে পারেন।")
@@ -151,10 +124,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if user_id in active_generations:
-        await update.message.reply_text(
-            f"⏳ চলমান: <b>{active_generations[user_id]['prompt']}</b>",
-            parse_mode='HTML'
-        )
+        await update.message.reply_text(f"⏳ চলমান: <b>{active_generations[user_id]['prompt']}</b>", parse_mode='HTML')
     else:
         await update.message.reply_text("✅ কোনো কাজ চলছে না।")
 
@@ -168,11 +138,10 @@ async def handle_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⚠️ আগে /setapi দিন।", parse_mode='HTML')
         return
     active_generations[user_id] = {'prompt': prompt}
-    
-    # ⚠️ Vercel এখানে টাইমআউট খাবে কারণ ২০-৩০ সেকেন্ড লাগে
+    # ⚠️ Vercel-এ এটি টাইমআউট খেতে পারে, কিন্তু কমান্ডগুলো ঠিক কাজ করবে
     await handle_generation(update, context, prompt)
 
-# ================= Flask রাউট (ওয়েবহুক) =================
+# ================= ওয়েবহুক রাউট (Vercel এখানে কল করবে) =================
 @app.route('/', methods=['GET'])
 def index():
     return "Bot is running!", 200
@@ -183,15 +152,11 @@ def webhook():
         json_data = request.get_json()
         if not json_data:
             return jsonify({"status": "error", "message": "No JSON"}), 400
-        
         update = Update.de_json(json_data, get_bot_app().bot)
         if update is None:
             return jsonify({"status": "error", "message": "Invalid update"}), 400
-        
-        # 🔥 এখানে আমরা await করছি। Vercel যতক্ষণ কাজ শেষ না হয় ততক্ষণ রেসপন্স দেয় না।
-        # যেহেতু /start, /help দ্রুত কাজ করে, এগুলো ঠিক হবে।
+        # সিঙ্ক্রোনাসভাবে প্রসেস করুন (Vercel-এ async কাজ করতে সমস্যা হয়)
         asyncio.run(get_bot_app().process_update(update))
-        
         return jsonify({"status": "ok"}), 200
     except Exception as e:
         print(f"Error: {e}")
