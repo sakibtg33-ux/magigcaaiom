@@ -22,8 +22,11 @@ user_api_keys = {}
 active_generations = {}
 
 async def generate_video(prompt: str, api_key: str) -> str:
-    """Magica API তে ভিডিও জেনারেট করে URL রিটার্ন করে (প্রগ্রেস বার ছাড়া)"""
-    async with httpx.AsyncClient(timeout=60.0) as client:
+    """
+    Magica API তে ভিডিও জেনারেট করে URL রিটার্ন করে।
+    টাইমআউট ৩০০ সেকেন্ড (৫ মিনিট) রাখা হয়েছে।
+    """
+    async with httpx.AsyncClient(timeout=300.0) as client:  # ৫ মিনিট টাইমআউট
         headers = {'Content-Type': 'application/json', 'Authorization': f'Bearer {api_key}'}
         payload = {
             "nodeType": "gemini_omni_flash",
@@ -34,7 +37,7 @@ async def generate_video(prompt: str, api_key: str) -> str:
         start_res.raise_for_status()
         run_id = start_res.json()['runId']
         
-        # পোলিং (প্রগ্রেস বার ছাড়া)
+        # পোলিং (টাইমআউট বাড়ানো হয়েছে)
         while True:
             poll_res = await client.get(f"{BASE_URL}/v1/nodes/runs/{run_id}", headers=headers)
             poll_res.raise_for_status()
@@ -55,16 +58,16 @@ async def handle_generation(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         return
     
     try:
-        # শুধু একটি মেসেজ দেখান
+        # শুধু একটি মেসেজ (প্রম্পট লুকানো)
         await update.message.reply_text(
             "⏳ ভিডিও তৈরি হতে ২০-৩০ সেকেন্ড সময় লাগতে পারে... দয়া করে অপেক্ষা করুন।"
         )
         
-        # ভিডিও জেনারেট করুন
+        # ভিডিও জেনারেট করুন (টাইমআউট এখন ৩০০ সেকেন্ড)
         video_url = await generate_video(prompt, api_key)
         
-        # ভিডিও ডাউনলোড করুন
-        async with httpx.AsyncClient(timeout=120.0) as client:
+        # ভিডিও ডাউনলোড করুন (টাইমআউট ৩০০ সেকেন্ড)
+        async with httpx.AsyncClient(timeout=300.0) as client:
             video_response = await client.get(video_url)
             video_response.raise_for_status()
             with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp_file:
@@ -85,6 +88,10 @@ async def handle_generation(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         
         os.unlink(tmp_path)
         
+    except httpx.TimeoutException:
+        await update.message.reply_text(
+            "⏳ ভিডিও জেনারেট করতে সময় বেশি লাগছে। দয়া করে আবার চেষ্টা করুন অথবা ছোট প্রম্পট দিন।"
+        )
     except Exception as e:
         await update.message.reply_text(
             f"❌ দুঃখিত, ভিডিও জেনারেট করতে সমস্যা হয়েছে:\n<code>{str(e)}</code>",
