@@ -6,19 +6,15 @@ from flask import Flask, request, jsonify
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
-# ================= কনফিগারেশন (সব এখানে) =================
-TG_BOT_TOKEN = "8426545218:AAFKYlHjZwUlLrgXVPyDhRr0cMreRtPWwqw"              # আপনার টোকেন দিন
-DEFAULT_MAGICA_API_KEY = "YOUR_API_KEY"      # আপনার API কী দিন (অথবা খালি রাখুন)
+# ================= কনফিগারেশন =================
+TG_BOT_TOKEN = 8426545218:AAFKYlHjZwUlLrgXVPyDhRr0cMreRtPWwqw"             # আপনার টোকেন দিন
+DEFAULT_MAGICA_API_KEY = "YOUR_API_KEY"     # আপনার API কী দিন (অথবা খালি)
 BASE_URL = "https://api.magica.com/api"
-# =========================================================
+# =============================================
 
 app = Flask(__name__)
-
-# মেমোরিতে ডেটা রাখা (Vercel-এ কাজ করবে না দীর্ঘমেয়াদে, তবে টেস্টিং-এর জন্য ঠিক)
 user_api_keys = {}
 active_generations = {}
-
-# গ্লোবাল অ্যাপ্লিকেশন অবজেক্ট
 bot_app = None
 
 def get_bot_app():
@@ -137,7 +133,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/start – শুরু\n"
         "/help – সাহায্য\n"
         "/status – চলমান কাজ\n"
-        "/setapi <API_KEY> – API সেট করুন",
+        "/setapi <API_KEY> – API সেট করুন\n\n"
+        "⚠️ Vercel-এ হোস্ট থাকায় ভিডিও জেনারেট করতে টাইমআউট হতে পারে। স্থানীয়ভাবে চালানোর জন্য `python bot.py` ব্যবহার করুন।",
         parse_mode='HTML'
     )
 
@@ -171,35 +168,31 @@ async def handle_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⚠️ আগে /setapi দিন।", parse_mode='HTML')
         return
     active_generations[user_id] = {'prompt': prompt}
-    asyncio.create_task(handle_generation(update, context, prompt))
+    
+    # ⚠️ Vercel এখানে টাইমআউট খাবে কারণ ২০-৩০ সেকেন্ড লাগে
+    await handle_generation(update, context, prompt)
 
-# ================= ওয়েবহুক হ্যান্ডলার (ফিক্সড) =================
-@app.route('/', methods=['GET', 'POST'])
+# ================= Flask রাউট (ওয়েবহুক) =================
+@app.route('/', methods=['GET'])
 def index():
     return "Bot is running!", 200
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
     try:
-        # JSON ডেটা নিন
         json_data = request.get_json()
         if not json_data:
-            return jsonify({"status": "error", "message": "No JSON data"}), 400
+            return jsonify({"status": "error", "message": "No JSON"}), 400
         
-        # Update অবজেক্ট তৈরি করুন
         update = Update.de_json(json_data, get_bot_app().bot)
         if update is None:
             return jsonify({"status": "error", "message": "Invalid update"}), 400
         
-        # ইভেন্ট লুপ তৈরি করে প্রসেস করুন (Vercel-এর সাথে সামঞ্জস্যপূর্ণ)
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        try:
-            loop.run_until_complete(get_bot_app().process_update(update))
-        finally:
-            loop.close()
+        # 🔥 এখানে আমরা await করছি। Vercel যতক্ষণ কাজ শেষ না হয় ততক্ষণ রেসপন্স দেয় না।
+        # যেহেতু /start, /help দ্রুত কাজ করে, এগুলো ঠিক হবে।
+        asyncio.run(get_bot_app().process_update(update))
         
         return jsonify({"status": "ok"}), 200
     except Exception as e:
-        print(f"Webhook error: {e}")
+        print(f"Error: {e}")
         return jsonify({"status": "error", "message": str(e)}), 500
