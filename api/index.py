@@ -2,7 +2,6 @@ import os
 import asyncio
 import tempfile
 import httpx
-from flask import Flask, request, jsonify
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
@@ -12,29 +11,10 @@ DEFAULT_MAGICA_API_KEY = "YOUR_API_KEY"    # Magica API Key (অথবা খা
 BASE_URL = "https://api.magica.com/api"
 # ========================================================================
 
-# Flask অ্যাপ্লিকেশন (Vercel এই 'app' খুঁজে পাবে)
-app = Flask(__name__)
-
-# মেমোরিতে ডেটা রাখা (Vercel-এ স্থায়ী নয়, তবে কমান্ডের জন্য ঠিক)
+# মেমোরিতে ডেটা রাখা (সাধারণ ব্যবহারের জন্য ঠিক আছে)
 user_api_keys = {}
 active_generations = {}
 
-# টেলিগ্রাম বট অ্যাপ্লিকেশন (গ্লোবাল)
-bot_app = None
-
-def get_bot_app():
-    """সিঙ্গেলটন প্যাটার্নে বট অ্যাপ্লিকেশন তৈরি"""
-    global bot_app
-    if bot_app is None:
-        bot_app = Application.builder().token(TG_BOT_TOKEN).build()
-        bot_app.add_handler(CommandHandler("start", start))
-        bot_app.add_handler(CommandHandler("help", help_command))
-        bot_app.add_handler(CommandHandler("status", status_command))
-        bot_app.add_handler(CommandHandler("setapi", set_api))
-        bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_prompt))
-    return bot_app
-
-# ================= API কল ফাংশন =================
 async def generate_video(prompt: str, api_key: str) -> str:
     async with httpx.AsyncClient(timeout=60.0) as client:
         headers = {'Content-Type': 'application/json', 'Authorization': f'Bearer {api_key}'}
@@ -57,7 +37,6 @@ async def generate_video(prompt: str, api_key: str) -> str:
                 raise Exception(data.get('error', 'Unknown error'))
             await asyncio.sleep(5)
 
-# ================= ভিডিও জেনারেশন হ্যান্ডলার =================
 async def handle_generation(update: Update, context: ContextTypes.DEFAULT_TYPE, prompt: str):
     user_id = update.effective_user.id
     api_key = user_api_keys.get(user_id) or DEFAULT_MAGICA_API_KEY
@@ -89,7 +68,6 @@ async def handle_generation(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         if user_id in active_generations:
             del active_generations[user_id]
 
-# ================= কমান্ড হ্যান্ডলারসমূহ =================
 async def set_api(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
     if not args:
@@ -106,8 +84,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/start – শুরু\n"
         "/help – সাহায্য\n"
         "/status – চলমান কাজ\n"
-        "/setapi <API_KEY> – API সেট করুন\n\n"
-        "⚠️ Vercel-এ হোস্ট থাকায় ভিডিও জেনারেট করতে টাইমআউট হতে পারে। স্থানীয়ভাবে চালানোর জন্য `python bot.py` ব্যবহার করুন।",
+        "/setapi <API_KEY> – API সেট করুন",
         parse_mode='HTML'
     )
 
@@ -138,26 +115,17 @@ async def handle_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⚠️ আগে /setapi দিন।", parse_mode='HTML')
         return
     active_generations[user_id] = {'prompt': prompt}
-    # ⚠️ Vercel-এ এটি টাইমআউট খেতে পারে, কিন্তু কমান্ডগুলো ঠিক কাজ করবে
     await handle_generation(update, context, prompt)
 
-# ================= ওয়েবহুক রাউট (Vercel এখানে কল করবে) =================
-@app.route('/', methods=['GET'])
-def index():
-    return "Bot is running!", 200
+def main():
+    app = Application.builder().token(TG_BOT_TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("help", help_command))
+    app.add_handler(CommandHandler("status", status_command))
+    app.add_handler(CommandHandler("setapi", set_api))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_prompt))
+    print("🤖 বট চালু হয়েছে! এখন টেলিগ্রামে গিয়ে প্রম্পট দিন।")
+    app.run_polling()
 
-@app.route('/webhook', methods=['POST'])
-def webhook():
-    try:
-        json_data = request.get_json()
-        if not json_data:
-            return jsonify({"status": "error", "message": "No JSON"}), 400
-        update = Update.de_json(json_data, get_bot_app().bot)
-        if update is None:
-            return jsonify({"status": "error", "message": "Invalid update"}), 400
-        # সিঙ্ক্রোনাসভাবে প্রসেস করুন (Vercel-এ async কাজ করতে সমস্যা হয়)
-        asyncio.run(get_bot_app().process_update(update))
-        return jsonify({"status": "ok"}), 200
-    except Exception as e:
-        print(f"Error: {e}")
-        return jsonify({"status": "error", "message": str(e)}), 500
+if __name__ == "__main__":
+    main()
